@@ -3,6 +3,10 @@ import random
 import time
 import json
 import os
+import math # Added for particle rotation
+
+# Run from the script's folder so relative asset paths (./placeholder, leaderboard.json) always resolve
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
 # --- Pygame Initialization ---
 pygame.init()
@@ -14,8 +18,10 @@ SCREEN_HEIGHT = infoObject.current_h
 screen = pygame.display.set_mode((SCREEN_WIDTH, SCREEN_HEIGHT), pygame.RESIZABLE)
 pygame.display.set_caption("Indovina: quale attrezzo pesca cosa?")
 
-INITIAL_SCREEN_WIDTH = 2400
-INITIAL_SCREEN_HEIGHT = 1200
+# CHANGED: Reduced the reference resolution for better scaling on modern screens.
+# This makes all UI elements (fonts, cards) appear larger relative to the window size.
+INITIAL_SCREEN_WIDTH = 2400 
+INITIAL_SCREEN_HEIGHT = 1200 
 
 # --- Colors ---
 BLACK = (20, 20, 20)
@@ -25,7 +31,9 @@ CARD_BACK_COLOR = (43, 108, 176)  # A nice blue
 MATCHED_COLOR = (72, 187, 120)    # A green for matched cards
 BUTTON_COLOR = (255, 165, 0)      # Orange for the button
 BORDER_COLOR = (255, 255, 255)    # White border for visibility
-ATTEMPT_COLOR = (255, 0, 0) # Red for low attempts
+LABEL_BAR_COLOR = (40, 40, 40, 220) 
+
+# REMOVED: BUBBLE_COLORS as fish images are now used
 
 # --- Background ---
 BACKGROUND_IMAGE_PATH = "./placeholder/sfondo2.png"
@@ -41,6 +49,7 @@ GRID_COLS = 6
 GRID_X = 0
 GRID_Y_TOP = 0
 GRID_Y_BOTTOM = 0
+GRID_WIDTH = 0 # New variable to store the total width of the card grid
 border_width = 8
 border_radius = 20
 
@@ -50,6 +59,8 @@ subtitle_font = None
 status_font = None
 card_font = None
 label_font = None
+leaderboard_font = None # New font for the leaderboard
+message_font = None # New font for final message
 
 # --- Game Icons (Paired images) ---
 # Separating the icons into two lists for easier row management.
@@ -83,9 +94,9 @@ start_time = 0
 can_flip = True
 loaded_images = {}
 is_revealing_cards = False
-game_attempts = 0
-MAX_ATTEMPTS = 6
 current_username = "" # Global variable to store the username
+FISH_PARTICLES = [] # List to hold active fish particles for the win effect
+PARTICLE_IMAGES = {} # NEW: Dictionary to hold small scaled particle images
 
 # --- Leaderboard Variables ---
 LEADERBOARD_FILE = 'leaderboard.json'
@@ -94,45 +105,144 @@ leaderboard = []
 # --- Custom Events ---
 REVEAL_END_EVENT = pygame.USEREVENT + 1
 
+
+# --- Classes for Fish Particle Effect (Updated for image-based particle) ---
+class FishParticle:
+    """A fish image particle for the win effect."""
+    def __init__(self, x, y):
+        # Select a random fish image for this particle
+        self.image_path = random.choice(FISH_ICONS)
+        self.image = PARTICLE_IMAGES.get(self.image_path)
+        
+        # Fallback for safety
+        if self.image is None:
+            self.image = pygame.Surface((30, 30), pygame.SRCALPHA)
+            self.image.fill((255, 0, 0, 100))
+        
+        self.rect = self.image.get_rect(center=(x, y))
+
+        # Initial position (using float for precision)
+        self.x = float(x)
+        self.y = float(y)
+
+        # Increased speed for a dramatic burst (bigger fish, more motion)
+        # Random burst direction (vx and vy)
+        angle = random.uniform(0, 2 * math.pi)
+        speed = random.uniform(8, 18) # Increased speed
+        self.vx = speed * math.cos(angle)
+        self.vy = speed * math.sin(angle)
+        
+        self.drift_vx = random.uniform(-0.5, 0.5)
+        self.drift_vy = random.uniform(-0.5, 0.5)
+
+        self.lifetime = 120 # Frames (2 seconds)
+        self.gravity = 0.4 # Slight downward pull for a falling/swimming effect
+
+    def update(self):
+        """Updates particle position and velocity."""
+        # Apply gravity and slight velocity decay
+        self.vy += self.gravity
+        self.vx *= 0.98 # Drag
+        self.vy *= 0.98 # Drag
+        
+        # Update position
+        self.x += self.vx + self.drift_vx
+        self.y += self.vy + self.drift_vy
+        self.rect.center = (int(self.x), int(self.y))
+        self.lifetime -= 1
+        
+    def draw(self, surface):
+        """Draws the fish particle image with rotation."""
+        if self.lifetime > 0:
+            # Calculate rotation angle based on movement direction
+            if self.vx != 0 or self.vy != 0:
+                # Angle in radians, then convert to degrees and adjust rotation
+                angle = math.atan2(self.vy, self.vx) * (180 / math.pi)
+                # Rotate the image
+                rotated_image = pygame.transform.rotate(self.image, -angle) 
+                rotated_rect = rotated_image.get_rect(center=self.rect.center)
+                surface.blit(rotated_image, rotated_rect)
+            else:
+                # Draw image without rotation if stationary
+                surface.blit(self.image, self.rect)
+
+
+def launch_win_effect(center_x, center_y, count=800): # Increased count for "a lot"
+    """Generates a burst of fish particles."""
+    global FISH_PARTICLES
+    # Clear existing particles before a new launch
+    FISH_PARTICLES.clear() 
+    for _ in range(count):
+        # Create a tight source around the center
+        x_start = center_x + random.uniform(-20, 20)
+        y_start = center_y + random.uniform(-20, 20)
+        particle = FishParticle(x_start, y_start)
+        FISH_PARTICLES.append(particle)
+
 # --- Functions ---
 def initialize_fonts():
     """Initializes all font objects. This must be called once at the start."""
-    global title_font, subtitle_font, status_font, card_font, label_font
+    global title_font, subtitle_font, status_font, card_font, label_font, leaderboard_font, message_font
 
+    # Calculate scale ratio based on the updated screen dimensions
     scale_ratio = min(SCREEN_WIDTH / INITIAL_SCREEN_WIDTH, SCREEN_HEIGHT / INITIAL_SCREEN_HEIGHT)
     
     title_font = pygame.font.Font(None, int(100 * scale_ratio))
     subtitle_font = pygame.font.Font(None, int(90 * scale_ratio))
     status_font = pygame.font.Font(None, int(80 * scale_ratio))
     card_font = pygame.font.Font(None, int(140 * scale_ratio))
-    label_font = pygame.font.Font(None, int(60 * scale_ratio))
+    label_font = pygame.font.Font(None, int(50 * scale_ratio)) 
+    leaderboard_font = pygame.font.Font(None, int(50 * scale_ratio)) 
+    message_font = pygame.font.Font(None, int(60 * scale_ratio)) 
 
 def update_layout():
     """Recalculates positions, sizes, and fonts for all game elements on resize."""
-    global GRID_X, GRID_Y_TOP, GRID_Y_BOTTOM, background_image_scaled, SCREEN_WIDTH, SCREEN_HEIGHT, CARD_SIZE, CARD_MARGIN, border_width
+    global GRID_X, GRID_Y_TOP, GRID_Y_BOTTOM, GRID_WIDTH, background_image_scaled, SCREEN_WIDTH, SCREEN_HEIGHT, CARD_SIZE, CARD_MARGIN, border_width, PARTICLE_IMAGES
     
     # Calculate scaling ratio based on the smaller dimension to maintain aspect ratio
     scale_ratio = min(SCREEN_WIDTH / INITIAL_SCREEN_WIDTH, SCREEN_HEIGHT / INITIAL_SCREEN_HEIGHT)
     
     # Recalculate dynamic sizes
-    CARD_SIZE = int(250 * scale_ratio)
-    CARD_MARGIN = int(40 * scale_ratio)
+    CARD_SIZE = int(350 * scale_ratio) 
+    CARD_MARGIN = int(50 * scale_ratio) 
     border_width = int(8 * scale_ratio)
 
+    # Calculate total grid width (6 cards + 5 margins + 1 margin for centering)
+    GRID_WIDTH = GRID_COLS * CARD_SIZE + (GRID_COLS - 1) * CARD_MARGIN 
+
     # Recalculate grid positions
-    GRID_X = (SCREEN_WIDTH - (GRID_COLS * (CARD_SIZE + CARD_MARGIN))) / 2 + CARD_MARGIN / 2
-    GRID_Y_TOP = SCREEN_HEIGHT * 0.35 # Position of the top row (Attrezzi)
-    GRID_Y_BOTTOM = GRID_Y_TOP + CARD_SIZE + CARD_MARGIN + int(40 * scale_ratio) # Position of the bottom row (Specie)
+    # Grid X position centered horizontally
+    GRID_X = (SCREEN_WIDTH - GRID_WIDTH) / 2
+    
+    # Grid Y positions adjusted slightly to accommodate the labels above
+    GRID_Y_TOP = SCREEN_HEIGHT * 0.35 
+    GRID_Y_BOTTOM = GRID_Y_TOP + CARD_SIZE + CARD_MARGIN + int(40 * scale_ratio) 
 
     # Update background image size
     if background_image:
         background_image_scaled = pygame.transform.scale(background_image, (SCREEN_WIDTH, SCREEN_HEIGHT))
 
-    # Re-scale loaded images for cards
+    # Re-scale loaded images for cards using smoothscale for quality
     for path in loaded_images:
-        image = loaded_images[path]
-        scaled_image = pygame.transform.scale(image, (CARD_SIZE - border_width*2, CARD_SIZE - border_width*2))
+        # Use smoothscale for higher quality image downscaling
+        # IMPORTANT: We use the original loaded image (which is stored in loaded_images)
+        original_image = loaded_images[path] 
+        scaled_image = pygame.transform.smoothscale(original_image, (CARD_SIZE - border_width*2, CARD_SIZE - border_width*2))
         loaded_images[path] = scaled_image
+
+    # NEW: Recalculate particle size and scale particle images ("bigger" fish)
+    particle_size = int(CARD_SIZE * 0.3) # 30% of card size
+    for path in FISH_ICONS:
+        try:
+            # Re-load original image for scaling consistency
+            original_image = pygame.image.load(path).convert_alpha()
+            scaled_image = pygame.transform.smoothscale(original_image, (particle_size, particle_size))
+            PARTICLE_IMAGES[path] = scaled_image
+        except pygame.error:
+            # Fallback
+            PARTICLE_IMAGES[path] = pygame.Surface((30, 30), pygame.SRCALPHA)
+            PARTICLE_IMAGES[path].fill((255, 0, 0, 100)) # Red semi-transparent square
+    
 
     # Recalculate card positions on the board
     for i in range(GRID_ROWS):
@@ -147,13 +257,14 @@ def update_layout():
 
 def setup_game():
     """Sets up the game board with shuffled pairs."""
-    global game_board, game_over, matched_pairs, game_score, start_time, can_flip, loaded_images, background_image, SCREEN_WIDTH, SCREEN_HEIGHT, is_revealing_cards, game_attempts, leaderboard
+    global game_board, game_over, matched_pairs, game_score, start_time, can_flip, loaded_images, background_image, SCREEN_WIDTH, SCREEN_HEIGHT, is_revealing_cards, leaderboard, PARTICLE_IMAGES
     
     game_over = False
     matched_pairs = 0
     game_score = 0
-    game_attempts = 0 # Reset attempts
     flipped_cards.clear()
+    FISH_PARTICLES.clear() # Clear fish particles for new game
+    PARTICLE_IMAGES.clear() # Clear particle images, they will be recreated/scaled in update_layout
     
     # Load the leaderboard
     leaderboard = load_leaderboard()
@@ -161,7 +272,7 @@ def setup_game():
     # Set state for initial card reveal
     is_revealing_cards = True
     can_flip = False # Prevent flipping while cards are being revealed
-    pygame.time.set_timer(REVEAL_END_EVENT, 8000) # 8-second timer for the reveal
+    pygame.time.set_timer(REVEAL_END_EVENT, 15000) # 8-second timer for the reveal
 
     # Load the background image once at the start
     try:
@@ -171,12 +282,14 @@ def setup_game():
         background_image = pygame.Surface((SCREEN_WIDTH, SCREEN_HEIGHT))
         background_image.fill(BLACK)
     
-    # Load all card images once
+    # Load all card images once (we load the originals here, scaling happens in update_layout)
     all_icons = GEAR_ICONS + FISH_ICONS
     for path in all_icons:
         try:
+            # Load the original image once
             image = pygame.image.load(path).convert_alpha()
-            loaded_images[path] = image
+            # Store the original image to be scaled later in update_layout
+            loaded_images[path] = image 
         except pygame.error as e:
             print(f"Error loading image: {path} - {e}")
             loaded_images[path] = pygame.Surface((250, 250))
@@ -198,7 +311,7 @@ def setup_game():
     # Build the game board with two distinct rows
     game_board = [gear_cards, fish_cards]
     
-    update_layout()
+    update_layout() # Initial layout calculation (and particle image scaling)
     start_time = time.time()
     can_flip = True
 
@@ -207,7 +320,16 @@ def load_leaderboard():
     if os.path.exists(LEADERBOARD_FILE):
         try:
             with open(LEADERBOARD_FILE, 'r') as f:
-                return json.load(f)
+                data = json.load(f)
+                # Cleanup old entries that might not have the 'time' key
+                cleaned_data = []
+                for entry in data:
+                    if 'time' not in entry:
+                        # Estimate time based on score for sorting/display robustness
+                        # Score = 1000000 - time, so time = 1000000 - score
+                        entry['time'] = 1000000 - entry.get('final_score', 0) 
+                    cleaned_data.append(entry)
+                return cleaned_data
         except (json.JSONDecodeError, IOError) as e:
             print(f"Error loading leaderboard file: {e}")
             return []
@@ -216,8 +338,8 @@ def load_leaderboard():
 def save_leaderboard():
     """Saves the current leaderboard to a local file."""
     try:
-        # Sort by final score descending before saving
-        leaderboard.sort(key=lambda x: x['final_score'], reverse=True)
+        # Sort by final score descending (higher score = faster time)
+        leaderboard.sort(key=lambda x: x['final_score'], reverse=True) 
         with open(LEADERBOARD_FILE, 'w') as f:
             json.dump(leaderboard, f, indent=4)
     except IOError as e:
@@ -225,7 +347,10 @@ def save_leaderboard():
 
 def get_username():
     """Draws a simple input box to get the user's name."""
-    input_box = pygame.Rect(SCREEN_WIDTH // 2 - 200, SCREEN_HEIGHT // 2, 400, 50)
+    # Fixed size input box for better aesthetics
+    input_box_width = int(SCREEN_WIDTH * 0.2)
+    input_box_height = int(SCREEN_HEIGHT * 0.05)
+    input_box = pygame.Rect(SCREEN_WIDTH // 2 - input_box_width // 2, SCREEN_HEIGHT // 2, input_box_width, input_box_height)
     color_active = pygame.Color('dodgerblue2')
     color_inactive = pygame.Color('lightskyblue3')
     color = color_inactive
@@ -256,9 +381,9 @@ def get_username():
         draw_text("Enter your username:", status_font, WHITE, SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 50)
         
         txt_surface = status_font.render(text, True, color)
-        width = max(200, txt_surface.get_width()+10)
-        input_box.w = width
-        screen.blit(txt_surface, (input_box.x+5, input_box.y+5))
+        # Use a fixed width for the text surface to prevent it from growing
+        text_rect = txt_surface.get_rect(center=input_box.center)
+        screen.blit(txt_surface, text_rect)
         pygame.draw.rect(screen, color, input_box, 2)
         
         pygame.display.flip()
@@ -286,65 +411,131 @@ def draw_game_board():
                 screen.blit(question_mark, q_rect)
 
 def draw_labels():
-    """Draws text labels for each row."""
-    # Label for the first row (Attrezzi)
-    label_text_1 = label_font.render("Attrezzi", True, WHITE)
-    label_rect_1 = label_text_1.get_rect()
-    label_rect_1.right = GRID_X - CARD_MARGIN
-    label_rect_1.centery = GRID_Y_TOP + CARD_SIZE / 2
-    screen.blit(label_text_1, label_rect_1)
+    """Draws a long webbing bar with the text labels above each row."""
+    
+    # Define the height of the webbing bar
+    BAR_HEIGHT = label_font.get_height() + 30 
+    
+    # --- Attrezzi Label (Top Row) ---
+    
+    # Define the rectangle for the webbing bar
+    bar_rect_1 = pygame.Rect(
+        GRID_X, # Start aligned with the first card
+        GRID_Y_TOP - BAR_HEIGHT, # Position the bar to end right at the start of the cards
+        GRID_WIDTH, # Span the entire width of the card grid
+        BAR_HEIGHT
+    )
 
-    # Label for the second row (Specie)
-    label_text_2 = label_font.render("Specie", True, WHITE)
-    label_rect_2 = label_text_2.get_rect()
-    label_rect_2.right = GRID_X - CARD_MARGIN
-    label_rect_2.centery = GRID_Y_BOTTOM + CARD_SIZE / 2
-    screen.blit(label_text_2, label_rect_2)
+    # Draw the semi-transparent bar
+    s1 = pygame.Surface((bar_rect_1.width, bar_rect_1.height), pygame.SRCALPHA)
+    s1.fill(LABEL_BAR_COLOR)
+    screen.blit(s1, (bar_rect_1.x, bar_rect_1.y))
+    
+    # Draw text centered horizontally and vertically in the bar
+    draw_text(
+        "Attrezzi:", 
+        label_font, 
+        WHITE, 
+        bar_rect_1.centerx, 
+        bar_rect_1.centery, 
+        align="center"
+    )
+
+    # --- Specie Label (Bottom Row) ---
+    
+    # Define the rectangle for the webbing bar
+    bar_rect_2 = pygame.Rect(
+        GRID_X, # Start aligned with the first card
+        GRID_Y_BOTTOM - BAR_HEIGHT, # Position the bar to end right at the start of the cards
+        GRID_WIDTH, # Span the entire width of the card grid
+        BAR_HEIGHT
+    )
+    
+    # Draw the semi-transparent bar
+    s2 = pygame.Surface((bar_rect_2.width, bar_rect_2.height), pygame.SRCALPHA)
+    s2.fill(LABEL_BAR_COLOR)
+    screen.blit(s2, (bar_rect_2.x, bar_rect_2.y))
+
+    # Draw text centered horizontally and vertically in the bar
+    draw_text(
+        "Specie:", 
+        label_font, 
+        WHITE, 
+        bar_rect_2.centerx, 
+        bar_rect_2.centery, 
+        align="center"
+    )
 
 
-def draw_text(text, font, color, x, y):
-    """A helper function to draw text on the screen."""
+def draw_text(text, font, color, x, y, align="center"):
+    """A helper function to draw text with alignment on the screen."""
     text_surface = font.render(text, True, color)
-    text_rect = text_surface.get_rect(center=(x, y))
+    text_rect = text_surface.get_rect()
+    if align == "center":
+        text_rect.center = (x, y)
+    elif align == "left":
+        text_rect.left = x
+        text_rect.centery = y
+        
     screen.blit(text_surface, text_rect)
 
 def draw_leaderboard():
-    """Draws the top 5 scores from the leaderboard."""
-    leaderboard_buffer = pygame.Rect(0, 0, SCREEN_WIDTH * 0.4, SCREEN_HEIGHT * 0.4)
-    leaderboard_buffer.center = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2)
-    pygame.draw.rect(screen, BLACK, leaderboard_buffer, border_radius=20)
+    """Draws the top 5 scores from the leaderboard at the bottom left."""
+    # New positioning: Bottom-left corner
+    PADDING = 20
+    buffer_width = SCREEN_WIDTH * 0.3
+    buffer_height = SCREEN_HEIGHT * 0.35
+    leaderboard_buffer = pygame.Rect(
+        PADDING,
+        SCREEN_HEIGHT - buffer_height - PADDING,
+        buffer_width,
+        buffer_height
+    )
+    pygame.draw.rect(screen, (0, 0, 0, 100), leaderboard_buffer, border_radius=20) # Use a semi-transparent black
     pygame.draw.rect(screen, BORDER_COLOR, leaderboard_buffer, 2, border_radius=20)
 
-    draw_text("Leaderboard", status_font, WHITE, leaderboard_buffer.centerx, leaderboard_buffer.top + 30)
+    draw_text("Classifica:", status_font, WHITE, leaderboard_buffer.centerx, leaderboard_buffer.top + 30)
 
-    # Sort leaderboard by final score (descending)
-    sorted_leaderboard = sorted(leaderboard, key=lambda x: x['final_score'], reverse=True)
+    # Sort leaderboard by final score (descending), which means fastest time is ranked highest
+    sorted_leaderboard = sorted(leaderboard, key=lambda x: x.get('final_score', 0), reverse=True)
 
     y_offset = leaderboard_buffer.top + 80
     for i, entry in enumerate(sorted_leaderboard[:5]):
-        text = f"{i+1}. {entry['username']} - Score: {entry['final_score']}"
-        draw_text(text, status_font, WHITE, leaderboard_buffer.centerx, y_offset)
-        y_offset += 50
+        # Use .get() to safely retrieve 'time', defaulting to N/A if missing (for old entries)
+        time_display = entry.get('time', 'N/A')
+        text = f"{i+1}. {entry['username']} - Tempo: {time_display}s"
+        draw_text(text, leaderboard_font, WHITE, leaderboard_buffer.left + PADDING, y_offset, align="left")
+        y_offset += 40
 
-def draw_game_over_screen(win_state, player_rank=None):
-    """Draws the game over screen with a win or lose message and the leaderboard."""
+def draw_final_message_and_ranking(win_state, player_rank):
+    """Draws the final win/lose message and ranking at the bottom left."""
+    PADDING = 20
+    buffer_width = SCREEN_WIDTH * 0.3
+    buffer_height = SCREEN_HEIGHT * 0.1
+    # Position the message buffer just above the leaderboard
+    message_buffer = pygame.Rect(
+        PADDING,
+        SCREEN_HEIGHT - (SCREEN_HEIGHT * 0.35) - PADDING - buffer_height - 10,
+        buffer_width,
+        buffer_height
+    )
     
-    if win_state:
-        win_message = f"Hai vinto! Tempo: {game_timer}s"
-        message_color = BLACK
-        # Add the rank if the player won
-        if player_rank:
-            win_message += f" - Classifica: #{player_rank}"
-    else:
-        win_message = "Hai perso! Tentativi esauriti."
-        message_color = ATTEMPT_COLOR
+    pygame.draw.rect(screen, (0, 0, 0, 100), message_buffer, border_radius=20)
+    pygame.draw.rect(screen, BORDER_COLOR, message_buffer, 2, border_radius=20)
+
+    # We assume a win since the game only ends on matched_pairs == 6
+    message = f"Hai vinto! Tempo: {game_timer}s"
+    message_color = WHITE
     
-    # Draw game over message
-    buffer_rect = pygame.Rect(0, 0, SCREEN_WIDTH * 0.4, SCREEN_HEIGHT * 0.15)
-    buffer_rect.center = (SCREEN_WIDTH // 2, SCREEN_HEIGHT // 2 - 200)
-    pygame.draw.rect(screen, WHITE, buffer_rect, border_radius=20)
-    draw_text(win_message, title_font, message_color, buffer_rect.centerx, buffer_rect.centery)
+    # Ensure player_rank is not None before trying to use it
+    if player_rank is not None:
+        message += f" Classifica: #{player_rank}"
     
+    draw_text(message, message_font, message_color, message_buffer.centerx, message_buffer.centery)
+
+
+def draw_game_over_screen():
+    """Draws the main elements of the game over screen (e.g., the button)."""
     # Draw play again button
     BUTTON_WIDTH = int(SCREEN_WIDTH * 0.2)
     BUTTON_HEIGHT = int(SCREEN_HEIGHT * 0.08)
@@ -357,15 +548,13 @@ def draw_game_over_screen(win_state, player_rank=None):
     pygame.draw.rect(screen, BUTTON_COLOR, play_again_rect, border_radius=10)
     draw_text("Gioca ancora", status_font, BLACK, play_again_rect.centerx, play_again_rect.centery)
     
-    # Draw the leaderboard on the same screen
-    draw_leaderboard()
-    
     return play_again_rect
 
 def handle_click(pos):
     """Handles a mouse click to flip a card."""
     global flipped_cards, game_score, matched_pairs, game_over, can_flip, is_revealing_cards
 
+    # Game only stops when completed
     if not can_flip or game_over or is_revealing_cards:
         return
 
@@ -377,18 +566,29 @@ def handle_click(pos):
                 
                 if len(flipped_cards) == 2:
                     can_flip = False
-                    pygame.time.set_timer(pygame.USEREVENT, 1000) 
+                    pygame.time.set_timer(pygame.USEREVENT, 1500) 
 
 def get_player_rank(leaderboard, username):
     """Finds the rank of the current player in the sorted leaderboard."""
-    for i, entry in enumerate(leaderboard):
+    # Re-sort leaderboard by final score (descending) to get the rank
+    sorted_leaderboard = sorted(leaderboard, key=lambda x: x.get('final_score', 0), reverse=True)
+    for i, entry in enumerate(sorted_leaderboard):
         if entry['username'] == username:
             return i + 1
     return None
+    
+def draw_title_and_status():
+    """Draws the title and game status text on the screen."""
+    draw_text("Indovina: quale attrezzo pesca cosa?", title_font, WHITE, SCREEN_WIDTH / 2, SCREEN_HEIGHT * 0.1)
+    draw_text("SHARPER Night 2025", subtitle_font, SUBTITLE_COLOR, SCREEN_WIDTH / 2, SCREEN_HEIGHT * 0.17)
+    
+    # Only display the time status
+    draw_text(f"Tempo: {game_timer}s", status_font, WHITE, SCREEN_WIDTH * 0.9, SCREEN_HEIGHT * 0.2)
+
 
 # --- Main Game Loop ---
 def main():
-    global game_score, game_over, game_timer, can_flip, matched_pairs, SCREEN_WIDTH, SCREEN_HEIGHT, screen, is_revealing_cards, game_attempts, leaderboard, current_username
+    global game_score, game_over, game_timer, can_flip, matched_pairs, SCREEN_WIDTH, SCREEN_HEIGHT, screen, is_revealing_cards, leaderboard, current_username, FISH_PARTICLES
 
     # Initialize fonts once at the start
     initialize_fonts()
@@ -422,9 +622,8 @@ def main():
                     card2['is_matched'] = True
                     matched_pairs += 1
                 else:
-                    game_attempts += 1 # Increment attempts on a failed match
-                    if game_attempts >= MAX_ATTEMPTS:
-                        game_over = True
+                    # No penalty for wrong guess, just flip back
+                    pass
                 
                 card1['is_flipped'] = False
                 card2['is_flipped'] = False
@@ -444,7 +643,7 @@ def main():
                     handle_click(event.pos)
                 elif displaying_game_over:
                     # Check for play again button on game over screen
-                    play_again_rect = draw_game_over_screen(matched_pairs == len(GEAR_ICONS), player_rank)
+                    play_again_rect = draw_game_over_screen()
                     if play_again_rect.collidepoint(event.pos):
                         # Prompt for a new username before starting a new game
                         new_username = get_username()
@@ -452,6 +651,7 @@ def main():
                             current_username = new_username
                             setup_game()
                             displaying_game_over = False
+                            FISH_PARTICLES.clear() # Clear particles for the new game
                         else:
                             running = False # Quit if user cancels username prompt
 
@@ -466,12 +666,21 @@ def main():
             game_over = True
 
         if game_over and not displaying_game_over:
-            # Calculate final score
-            final_score = (matched_pairs * 1000) - (game_timer * 10) - (game_attempts * 50)
-            final_score = max(0, final_score)
+            # UPDATED: Launch fish/bubble effect when the game is won
+            launch_win_effect(SCREEN_WIDTH / 2, SCREEN_HEIGHT / 2)
+            
+            # Calculate final score: Maximize score by minimizing time.
+            # We use a base large number (1,000,000) minus time. Higher score = lower time.
+            final_score = 1000000 - game_timer
             
             # Add new score to leaderboard and save
-            new_entry = {'username': current_username, 'final_score': final_score}
+            new_entry = {
+                'username': current_username, 
+                'final_score': final_score, # For sorting
+                'time': game_timer          # For display
+            }
+            # Remove old entry if username already exists before appending
+            leaderboard = [entry for entry in leaderboard if entry['username'] != current_username]
             leaderboard.append(new_entry)
             save_leaderboard()
             
@@ -481,22 +690,25 @@ def main():
 
         # --- Drawing to the Screen ---
         screen.blit(background_image_scaled, (0, 0))
-
-        draw_text("Indovina: quale attrezzo pesca cosa?", title_font, WHITE, SCREEN_WIDTH / 2, SCREEN_HEIGHT * 0.1)
-        draw_text("SHARPER Night 2025", subtitle_font, SUBTITLE_COLOR, SCREEN_WIDTH / 2, SCREEN_HEIGHT * 0.17)
-        
-        # New attempt counter display
-        attempts_color = WHITE if game_attempts < MAX_ATTEMPTS - 1 else ATTEMPT_COLOR
-        draw_text(f"Tentativi: {game_attempts}/{MAX_ATTEMPTS}", status_font, attempts_color, SCREEN_WIDTH * 0.1, SCREEN_HEIGHT * 0.2)
-        draw_text(f"Tempo: {game_timer}s", status_font, WHITE, SCREEN_WIDTH * 0.9, SCREEN_HEIGHT * 0.2)
+        draw_title_and_status()
 
         if not displaying_game_over:
             draw_game_board()
             draw_labels() # Call the new function to draw the labels
 
         if displaying_game_over:
-            draw_game_over_screen(matched_pairs == len(GEAR_ICONS), player_rank)
-
+            # We assume a win since the game only ends on matched_pairs == 6
+            draw_final_message_and_ranking(True, player_rank) 
+            draw_leaderboard()
+            draw_game_over_screen()
+            
+        # UPDATED: Update and draw fish particles
+        for particle in FISH_PARTICLES:
+            particle.update()
+            particle.draw(screen)
+        # Remove dead particles
+        FISH_PARTICLES = [p for p in FISH_PARTICLES if p.lifetime > 0]
+            
         pygame.display.flip()
 
     pygame.quit()

@@ -1,0 +1,28 @@
+# Python virtual environment (this folder doubles as a venv on Windows)
+Include/
+Lib/
+Scripts/
+share/
+pyvenv.cfg
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Local runtime data (player names/scores)
+leaderboard.json
+
+# Local backups, old versions and working material
+_old/
+bck/
+bck_images/
+_backup_before_publish.bundle
+notes_to_improve.txt
+*.pptx
+*.pdf
+
+# OS / editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
